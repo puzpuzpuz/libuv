@@ -33,12 +33,27 @@ static uv_once_t once = UV_ONCE_INIT;
 static uv_cond_t cond;
 static uv_mutex_t mutex;
 static unsigned int idle_threads;
-static unsigned int slow_io_work_running;
 static unsigned int nthreads;
-static uv_thread_t* threads;
-static uv_thread_t default_threads[4];
 static QUEUE exit_message;
 static QUEUE wq;
+
+typedef struct
+{
+  uv_thread_t thread;
+  uv_cond_t cond;
+  uv_mutex_t mutex;
+  QUEUE queue;
+} w_thread;
+
+typedef struct
+{
+  uv_sem_t* sem;
+  unsigned int n;
+} w_thread_args;
+
+static w_thread* w_threads;
+static w_thread default_w_threads[4];
+
 
 
 static void uv__cancelled(struct uv__work* w) {
@@ -50,10 +65,12 @@ static void uv__cancelled(struct uv__work* w) {
  * never holds the global mutex and the loop-local mutex at the same time.
  */
 static void worker(void* arg) {
+  unsigned int n;
   struct uv__work* w;
   QUEUE* q;
 
-  uv_sem_post((uv_sem_t*) arg);
+  n = ((w_thread_args*) arg)->n;
+  uv_sem_post(((w_thread_args*) arg)->sem);
   arg = NULL;
 
   for (;;) {
@@ -105,24 +122,24 @@ static void post(QUEUE* q, enum uv__work_kind kind) {
 
 void uv__threadpool_cleanup(void) {
 #ifndef _WIN32
-  unsigned int i;
+  w_thread* t;
 
   if (nthreads == 0)
     return;
 
   post(&exit_message, UV__WORK_CPU);
 
-  for (i = 0; i < nthreads; i++)
-    if (uv_thread_join(threads + i))
+  for (t = w_threads; t < w_threads + nthreads; t++)
+    if (uv_thread_join(&t->thread))
       abort();
 
-  if (threads != default_threads)
-    uv__free(threads);
+  if (w_threads != default_w_threads)
+    uv__free(w_threads);
 
   uv_mutex_destroy(&mutex);
   uv_cond_destroy(&cond);
 
-  threads = NULL;
+  w_threads = NULL;
   nthreads = 0;
 #endif
 }
@@ -131,9 +148,11 @@ void uv__threadpool_cleanup(void) {
 static void init_threads(void) {
   unsigned int i;
   const char* val;
+  w_thread* t;
   uv_sem_t sem;
+  w_thread_args* args;
 
-  nthreads = ARRAY_SIZE(default_threads);
+  nthreads = ARRAY_SIZE(default_w_threads);
   val = getenv("UV_THREADPOOL_SIZE");
   if (val != NULL)
     nthreads = atoi(val);
@@ -142,13 +161,21 @@ static void init_threads(void) {
   if (nthreads > MAX_THREADPOOL_SIZE)
     nthreads = MAX_THREADPOOL_SIZE;
 
-  threads = default_threads;
-  if (nthreads > ARRAY_SIZE(default_threads)) {
-    threads = uv__malloc(nthreads * sizeof(threads[0]));
-    if (threads == NULL) {
-      nthreads = ARRAY_SIZE(default_threads);
-      threads = default_threads;
+  w_threads = default_w_threads;
+  if (nthreads > ARRAY_SIZE(default_w_threads)) {
+    w_threads = uv__malloc(nthreads * sizeof(w_threads[0]));
+    if (w_threads == NULL) {
+      nthreads = ARRAY_SIZE(default_w_threads);
+      w_threads = default_w_threads;
     }
+  }
+
+  for (t = w_threads; t < w_threads + nthreads; t++) {
+    if (uv_cond_init(&t->cond))
+      abort();
+    if (uv_mutex_init(&t->mutex))
+      abort();
+    QUEUE_INIT(&t->queue);
   }
 
   if (uv_cond_init(&cond))
@@ -162,14 +189,20 @@ static void init_threads(void) {
   if (uv_sem_init(&sem, 0))
     abort();
 
-  for (i = 0; i < nthreads; i++)
-    if (uv_thread_create(threads + i, worker, &sem))
+  args = uv__malloc(nthreads * sizeof(w_thread_args));
+  for (i = 0; i < nthreads; i++) {
+    (args + i)->sem = &sem;
+    (args + i)->n = i;
+    t = w_threads + i;
+    if (uv_thread_create(&t->thread, worker, args + i))
       abort();
+  }
 
   for (i = 0; i < nthreads; i++)
     uv_sem_wait(&sem);
 
-  uv_sem_destroy(&sem);
+  uv__free(args);
+  uv_sem_destroy(&sem);  
 }
 
 
