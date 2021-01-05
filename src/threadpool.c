@@ -26,16 +26,16 @@
 #endif
 
 #include <stdlib.h>
+// TODO doesn't seem to be cross-platform
+#include <stdatomic.h>
 
 #define MAX_THREADPOOL_SIZE 1024
+#define POST_SPINS_NUM 2
 
 static uv_once_t once = UV_ONCE_INIT;
-static uv_cond_t cond;
-static uv_mutex_t mutex;
-static unsigned int idle_threads;
 static unsigned int nthreads;
 static QUEUE exit_message;
-static QUEUE wq;
+static atomic_uint post_n = 0;
 
 typedef struct
 {
@@ -65,7 +65,8 @@ static void uv__cancelled(struct uv__work* w) {
  * never holds the global mutex and the loop-local mutex at the same time.
  */
 static void worker(void* arg) {
-  unsigned int n;
+  unsigned int n, i;
+  w_thread* wt;
   struct uv__work* w;
   QUEUE* q;
 
@@ -74,25 +75,41 @@ static void worker(void* arg) {
   arg = NULL;
 
   for (;;) {
-    uv_mutex_lock(&mutex);
-
-    while (QUEUE_EMPTY(&wq)) {
-      idle_threads += 1;
-      uv_cond_wait(&cond, &mutex);
-      idle_threads -= 1;
+    // work stealing
+    for (i = 0; i < nthreads; ++i) {
+      wt = w_threads + ((i + n) % nthreads);
+      if (uv_mutex_trylock(&wt->mutex) == 0) {
+        if (QUEUE_EMPTY(&wt->queue)) {
+          uv_mutex_unlock(&wt->mutex);
+          wt = NULL;
+          continue;
+        }
+        break;
+      } else {
+        wt = NULL;
+      }
     }
 
-    q = QUEUE_HEAD(&wq);
+    // could not steal, so fallback to pessimistic mode
+    if (wt == NULL) {
+      wt = w_threads + n;
+      uv_mutex_lock(&wt->mutex);
+      while (QUEUE_EMPTY(&wt->queue)) {
+        uv_cond_wait(&wt->cond, &wt->mutex);
+      }
+    }
+
+    q = QUEUE_HEAD(&wt->queue);
 
     if (q == &exit_message)
-      uv_cond_signal(&cond);
+      uv_cond_signal(&wt->cond);
     else {
       QUEUE_REMOVE(q);
       QUEUE_INIT(q);  /* Signal uv_cancel() that the work req is
                              executing. */
     }
 
-    uv_mutex_unlock(&mutex);
+    uv_mutex_unlock(&wt->mutex);
 
     if (q == &exit_message)
       break;
@@ -100,6 +117,7 @@ static void worker(void* arg) {
     w = QUEUE_DATA(q, struct uv__work, wq);
     w->work(w);
 
+    // TODO result queue may be a bottleneck
     uv_mutex_lock(&w->loop->wq_mutex);
     w->work = NULL;  /* Signal uv_cancel() that the work req is done
                         executing. */
@@ -111,33 +129,58 @@ static void worker(void* arg) {
 
 
 static void post(QUEUE* q, enum uv__work_kind kind) {
-  uv_mutex_lock(&mutex);
+  unsigned int n, i;
+  w_thread* wt;
 
-  QUEUE_INSERT_TAIL(&wq, q);
-  if (idle_threads > 0)
-    uv_cond_signal(&cond);
-  uv_mutex_unlock(&mutex);
+  n = atomic_fetch_add_explicit(&post_n, 1, memory_order_relaxed);
+  // optimistic post mode
+  for (i = 0; i < nthreads * POST_SPINS_NUM; ++i) {
+    wt = w_threads + ((i + n) % nthreads);
+    if (uv_mutex_trylock(&wt->mutex) == 0) {      
+      break;
+    } else {
+      wt = NULL;
+    }
+  }
+
+  // fallback to pessimistic mode
+  if (wt == NULL) {
+    wt = w_threads + (n % nthreads);
+    uv_mutex_lock(&wt->mutex);
+  }
+
+  QUEUE_INSERT_TAIL(&wt->queue, q);
+  uv_cond_signal(&wt->cond);
+  uv_mutex_unlock(&wt->mutex);
 }
 
 
 void uv__threadpool_cleanup(void) {
 #ifndef _WIN32
-  w_thread* t;
+  w_thread* wt;
 
   if (nthreads == 0)
     return;
 
-  post(&exit_message, UV__WORK_CPU);
+  // post exit message into all queues
+  for (wt = w_threads; wt < w_threads + nthreads; wt++) {
+    uv_mutex_lock(&wt->mutex);
+    QUEUE_INSERT_TAIL(&wt->queue, &exit_message); // UV__WORK_CPU
+    uv_cond_signal(&wt->cond);
+    uv_mutex_unlock(&wt->mutex);
+  }
 
-  for (t = w_threads; t < w_threads + nthreads; t++)
-    if (uv_thread_join(&t->thread))
+  for (wt = w_threads; wt < w_threads + nthreads; wt++)
+    if (uv_thread_join(&wt->thread))
       abort();
 
+  for (wt = w_threads; wt < w_threads + nthreads; wt++) {
+    uv_mutex_destroy(&wt->mutex);
+    uv_cond_destroy(&wt->cond);
+  }
+  
   if (w_threads != default_w_threads)
     uv__free(w_threads);
-
-  uv_mutex_destroy(&mutex);
-  uv_cond_destroy(&cond);
 
   w_threads = NULL;
   nthreads = 0;
@@ -148,7 +191,7 @@ void uv__threadpool_cleanup(void) {
 static void init_threads(void) {
   unsigned int i;
   const char* val;
-  w_thread* t;
+  w_thread* wt;
   uv_sem_t sem;
   w_thread_args* args;
 
@@ -170,21 +213,13 @@ static void init_threads(void) {
     }
   }
 
-  for (t = w_threads; t < w_threads + nthreads; t++) {
-    if (uv_cond_init(&t->cond))
+  for (wt = w_threads; wt < w_threads + nthreads; wt++) {
+    if (uv_cond_init(&wt->cond))
       abort();
-    if (uv_mutex_init(&t->mutex))
+    if (uv_mutex_init(&wt->mutex))
       abort();
-    QUEUE_INIT(&t->queue);
+    QUEUE_INIT(&wt->queue);
   }
-
-  if (uv_cond_init(&cond))
-    abort();
-
-  if (uv_mutex_init(&mutex))
-    abort();
-
-  QUEUE_INIT(&wq);
 
   if (uv_sem_init(&sem, 0))
     abort();
@@ -193,8 +228,8 @@ static void init_threads(void) {
   for (i = 0; i < nthreads; i++) {
     (args + i)->sem = &sem;
     (args + i)->n = i;
-    t = w_threads + i;
-    if (uv_thread_create(&t->thread, worker, args + i))
+    wt = w_threads + i;
+    if (uv_thread_create(&wt->thread, worker, args + i))
       abort();
   }
 
@@ -243,7 +278,8 @@ void uv__work_submit(uv_loop_t* loop,
 static int uv__work_cancel(uv_loop_t* loop, uv_req_t* req, struct uv__work* w) {
   int cancelled;
 
-  uv_mutex_lock(&mutex);
+  // TODO fix cancellation
+  // uv_mutex_lock(&mutex);
   uv_mutex_lock(&w->loop->wq_mutex);
 
   cancelled = !QUEUE_EMPTY(&w->wq) && w->work != NULL;
@@ -251,7 +287,7 @@ static int uv__work_cancel(uv_loop_t* loop, uv_req_t* req, struct uv__work* w) {
     QUEUE_REMOVE(&w->wq);
 
   uv_mutex_unlock(&w->loop->wq_mutex);
-  uv_mutex_unlock(&mutex);
+  // uv_mutex_unlock(&mutex);
 
   if (!cancelled)
     return UV_EBUSY;
