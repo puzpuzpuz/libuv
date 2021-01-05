@@ -350,6 +350,7 @@ if(LIBUV_BUILD_TESTS)
     test/benchmark-spawn.c
     test/benchmark-tcp-write-batch.c
     test/benchmark-thread.c
+    test/benchmark-threadpool.c
     test/benchmark-udp-pummel.c
     test/blackhole-server.c
     test/dns-server.c
