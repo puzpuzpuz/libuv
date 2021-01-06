@@ -26,11 +26,11 @@
 #endif
 
 #include <stdlib.h>
-// TODO doesn't seem to be cross-platform
+// TODO does libuv use C11?
 #include <stdatomic.h>
 
 #define MAX_THREADPOOL_SIZE 1024
-#define POST_SPINS_NUM 2
+#define THREADPOOL_POST_SPINS 2
 
 static uv_once_t once = UV_ONCE_INIT;
 static unsigned int nthreads;
@@ -43,16 +43,16 @@ typedef struct
   uv_cond_t cond;
   uv_mutex_t mutex;
   QUEUE queue;
-} w_thread;
+} w_thread_t;
 
 typedef struct
 {
   uv_sem_t* sem;
   unsigned int n;
-} w_thread_args;
+} w_thread_args_t;
 
-static w_thread* w_threads;
-static w_thread default_w_threads[4];
+static w_thread_t* w_threads;
+static w_thread_t default_w_threads[4];
 
 
 
@@ -66,12 +66,12 @@ static void uv__cancelled(struct uv__work* w) {
  */
 static void worker(void* arg) {
   unsigned int n, i;
-  w_thread* wt;
+  w_thread_t* wt;
   struct uv__work* w;
   QUEUE* q;
 
-  n = ((w_thread_args*) arg)->n;
-  uv_sem_post(((w_thread_args*) arg)->sem);
+  n = ((w_thread_args_t*) arg)->n;
+  uv_sem_post(((w_thread_args_t*) arg)->sem);
   arg = NULL;
 
   for (;;) {
@@ -130,11 +130,11 @@ static void worker(void* arg) {
 
 static void post(QUEUE* q, enum uv__work_kind kind) {
   unsigned int n, i;
-  w_thread* wt;
+  w_thread_t* wt;
 
   n = atomic_fetch_add_explicit(&post_n, 1, memory_order_relaxed);
   // optimistic post mode
-  for (i = 0; i < nthreads * POST_SPINS_NUM; ++i) {
+  for (i = 0; i < nthreads * THREADPOOL_POST_SPINS; ++i) {
     wt = w_threads + ((i + n) % nthreads);
     if (uv_mutex_trylock(&wt->mutex) == 0) {      
       break;
@@ -157,7 +157,7 @@ static void post(QUEUE* q, enum uv__work_kind kind) {
 
 void uv__threadpool_cleanup(void) {
 #ifndef _WIN32
-  w_thread* wt;
+  w_thread_t* wt;
 
   if (nthreads == 0)
     return;
@@ -191,9 +191,9 @@ void uv__threadpool_cleanup(void) {
 static void init_threads(void) {
   unsigned int i;
   const char* val;
-  w_thread* wt;
+  w_thread_t* wt;
   uv_sem_t sem;
-  w_thread_args* args;
+  w_thread_args_t* args;
 
   nthreads = ARRAY_SIZE(default_w_threads);
   val = getenv("UV_THREADPOOL_SIZE");
@@ -224,7 +224,7 @@ static void init_threads(void) {
   if (uv_sem_init(&sem, 0))
     abort();
 
-  args = uv__malloc(nthreads * sizeof(w_thread_args));
+  args = uv__malloc(nthreads * sizeof(w_thread_args_t));
   for (i = 0; i < nthreads; i++) {
     (args + i)->sem = &sem;
     (args + i)->n = i;
