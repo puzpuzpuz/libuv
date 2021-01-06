@@ -117,13 +117,11 @@ static void worker(void* arg) {
     w = QUEUE_DATA(q, struct uv__work, wq);
     w->work(w);
 
-    // TODO result queue may be a bottleneck
-    uv_mutex_lock(&w->loop->wq_mutex);
     w->work = NULL;  /* Signal uv_cancel() that the work req is done
                         executing. */
-    QUEUE_INSERT_TAIL(&w->loop->wq, &w->wq);
+    w->wq_.state = w;
+    mpscq_push(&w->loop->wq_, &w->wq_);
     uv_async_send(&w->loop->wq_async);
-    uv_mutex_unlock(&w->loop->wq_mutex);
   }
 }
 
@@ -276,27 +274,28 @@ void uv__work_submit(uv_loop_t* loop,
 
 
 static int uv__work_cancel(uv_loop_t* loop, uv_req_t* req, struct uv__work* w) {
-  int cancelled;
+  // int cancelled;
 
   // TODO fix cancellation
+
   // uv_mutex_lock(&mutex);
-  uv_mutex_lock(&w->loop->wq_mutex);
+  // uv_mutex_lock(&w->loop->wq_mutex);
 
-  cancelled = !QUEUE_EMPTY(&w->wq) && w->work != NULL;
-  if (cancelled)
-    QUEUE_REMOVE(&w->wq);
+  // cancelled = !QUEUE_EMPTY(&w->wq) && w->work != NULL;
+  // if (cancelled)
+  //   QUEUE_REMOVE(&w->wq);
 
-  uv_mutex_unlock(&w->loop->wq_mutex);
+  // uv_mutex_unlock(&w->loop->wq_mutex);
   // uv_mutex_unlock(&mutex);
 
-  if (!cancelled)
-    return UV_EBUSY;
+  // if (!cancelled)
+  //   return UV_EBUSY;
 
   w->work = uv__cancelled;
-  uv_mutex_lock(&loop->wq_mutex);
-  QUEUE_INSERT_TAIL(&loop->wq, &w->wq);
-  uv_async_send(&loop->wq_async);
-  uv_mutex_unlock(&loop->wq_mutex);
+  // uv_mutex_lock(&loop->wq_mutex);
+  // QUEUE_INSERT_TAIL(&loop->wq, &w->wq);
+  // uv_async_send(&loop->wq_async);
+  // uv_mutex_unlock(&loop->wq_mutex);
 
   return 0;
 }
@@ -305,22 +304,21 @@ static int uv__work_cancel(uv_loop_t* loop, uv_req_t* req, struct uv__work* w) {
 void uv__work_done(uv_async_t* handle) {
   struct uv__work* w;
   uv_loop_t* loop;
-  QUEUE* q;
-  QUEUE wq;
+  mpscq_node_t* node;
   int err;
 
   loop = container_of(handle, uv_loop_t, wq_async);
-  uv_mutex_lock(&loop->wq_mutex);
-  QUEUE_MOVE(&loop->wq, &wq);
-  uv_mutex_unlock(&loop->wq_mutex);
+  node = mpscq_pop(&loop->wq_);
+  // uv_mutex_lock(&loop->wq_mutex);
+  // QUEUE_MOVE(&loop->wq, &wq);
+  // uv_mutex_unlock(&loop->wq_mutex);
 
-  while (!QUEUE_EMPTY(&wq)) {
-    q = QUEUE_HEAD(&wq);
-    QUEUE_REMOVE(q);
-
-    w = container_of(q, struct uv__work, wq);
+  while (node != NULL) {
+    w = (struct uv__work*) node->state;
     err = (w->work == uv__cancelled) ? UV_ECANCELED : 0;
     w->done(w, err);
+
+    node = mpscq_pop(&loop->wq_);
   }
 }
 

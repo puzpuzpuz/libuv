@@ -48,6 +48,7 @@ int uv_loop_init(uv_loop_t* loop) {
 
   heap_init((struct heap*) &loop->timer_heap);
   QUEUE_INIT(&loop->wq);
+  mpscq_create(&loop->wq_);
   QUEUE_INIT(&loop->idle_handles);
   QUEUE_INIT(&loop->async_handles);
   QUEUE_INIT(&loop->check_handles);
@@ -179,10 +180,11 @@ void uv__loop_close(uv_loop_t* loop) {
     loop->backend_fd = -1;
   }
 
-  uv_mutex_lock(&loop->wq_mutex);
-  assert(QUEUE_EMPTY(&loop->wq) && "thread pool work queue not empty!");
-  assert(!uv__has_active_reqs(loop));
-  uv_mutex_unlock(&loop->wq_mutex);
+  // TODO implement and use mpscq_size
+  // uv_mutex_lock(&loop->wq_mutex);
+  // assert(QUEUE_EMPTY(&loop->wq) && "thread pool work queue not empty!");
+  // assert(!uv__has_active_reqs(loop));
+  // uv_mutex_unlock(&loop->wq_mutex);
   uv_mutex_destroy(&loop->wq_mutex);
 
   /*

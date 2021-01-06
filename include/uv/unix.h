@@ -43,8 +43,8 @@
 #include <pthread.h>
 #include <signal.h>
 
-#include "uv/threadpool.h"
 #include "uv/mpscqueue.h"
+#include "uv/threadpool.h"
 
 #if defined(__linux__)
 # include "uv/linux.h"

@@ -138,6 +138,7 @@ int uv_loop_init(uv_loop_t* loop) {
   uv_update_time(loop);
 
   QUEUE_INIT(&loop->wq);
+  mpscq_create(&loop->wq_);
   QUEUE_INIT(&loop->handle_queue);
   loop->active_reqs.count = 0;
   loop->active_handles = 0;
@@ -220,10 +221,11 @@ void uv__loop_close(uv_loop_t* loop) {
       closesocket(sock);
   }
 
-  uv_mutex_lock(&loop->wq_mutex);
-  assert(QUEUE_EMPTY(&loop->wq) && "thread pool work queue not empty!");
-  assert(!uv__has_active_reqs(loop));
-  uv_mutex_unlock(&loop->wq_mutex);
+  // TODO implement and use mpscq_size
+  // uv_mutex_lock(&loop->wq_mutex);
+  // assert(QUEUE_EMPTY(&loop->wq) && "thread pool work queue not empty!");
+  // assert(!uv__has_active_reqs(loop));
+  // uv_mutex_unlock(&loop->wq_mutex);
   uv_mutex_destroy(&loop->wq_mutex);
 
   lfields = uv__get_internal_fields(loop);
