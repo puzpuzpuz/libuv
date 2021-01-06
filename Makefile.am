@@ -22,6 +22,7 @@ include_HEADERS=include/uv.h
 uvincludedir = $(includedir)/uv
 uvinclude_HEADERS = include/uv/errno.h \
                     include/uv/threadpool.h \
+                    include/uv/mpscqueue.h \
                     include/uv/version.h
 
 CLEANFILES =
@@ -40,6 +41,7 @@ libuv_la_SOURCES = src/fs-poll.c \
                    src/strscpy.c \
                    src/strscpy.h \
                    src/threadpool.c \
+                   src/mpscqueue.c \
                    src/timer.c \
                    src/uv-data-getter-setters.c \
                    src/uv-common.c \

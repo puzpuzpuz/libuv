@@ -44,6 +44,7 @@
 #include <signal.h>
 
 #include "uv/threadpool.h"
+#include "uv/mpscqueue.h"
 
 #if defined(__linux__)
 # include "uv/linux.h"
@@ -216,6 +217,7 @@ typedef struct {
   uv__io_t** watchers;                                                        \
   unsigned int nwatchers;                                                     \
   unsigned int nfds;                                                          \
+  mpscq_t wq_;                                                                \
   void* wq[2];                                                                \
   uv_mutex_t wq_mutex;                                                        \
   uv_async_t wq_async;                                                        \

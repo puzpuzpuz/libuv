@@ -103,6 +103,7 @@ set(uv_sources
     src/random.c
     src/strscpy.c
     src/threadpool.c
+    src/mpscqueue.c
     src/timer.c
     src/uv-common.c
     src/uv-data-getter-setters.c

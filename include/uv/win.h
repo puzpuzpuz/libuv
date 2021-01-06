@@ -40,6 +40,7 @@ typedef intptr_t ssize_t;
 
 #include "uv/tree.h"
 #include "uv/threadpool.h"
+#include "uv/mpscqueue.h"
 
 #define MAX_PIPENAME_LEN 256
 
@@ -213,6 +214,7 @@ typedef struct {
   /* This handle holds the peer sockets for the fast variant of uv_poll_t */  \
   SOCKET poll_peer_sockets[UV_MSAFD_PROVIDER_COUNT];                          \
   /* Threadpool */                                                            \
+  mpscq_t wq_;                                                                \
   void* wq[2];                                                                \
   uv_mutex_t wq_mutex;                                                        \
   uv_async_t wq_async;                                                        \
